@@ -275,7 +275,7 @@ def process_artrnrm(remarks_records):
 
     df = df.sort_values(['DOCNUM', 'SEQNUM'])
     grouped = df.groupby('DOCNUM')['REMARK'].apply(
-        lambda x: ' '.join([s.strip() for s in x if s.strip() != ''])
+        lambda x: ' | '.join([s.strip() for s in x if s.strip() != ''])
     )
 
     out_rows = []
