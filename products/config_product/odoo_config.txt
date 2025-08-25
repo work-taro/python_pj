@@ -1,0 +1,11 @@
+url=http://192.168.9.102:8069
+db=KC_UAT_27022024
+username=kaceeapp
+password=Kacee2023
+module=KC
+
+url_ev=http://192.168.9.101:8069
+db_ev=ev_uat02
+username_ev=kaceeapp
+password_ev=Kacee2023
+module_ev=EV
