@@ -19,12 +19,12 @@ dbf_file_path_artrn = 'C:/Users/kc/desktop/DBF/ARTRN.DBF'
 dbf_file_path_stcrd = 'C:/Users/kc/desktop/DBF/STCRD.DBF'
 dbf_file_path_artrnrm = 'C:/Users/kc/desktop/DBF/ARTRNRM.DBF'
 
-end_date = pd.Timestamp.today()
-start_date = (end_date - pd.DateOffset(months=2)).replace(day=1)
+# end_date = pd.Timestamp.today()
+# start_date = (end_date - pd.DateOffset(months=2)).replace(day=1)
 
 
-# end_date = pd.Timestamp(year=2025, month=8, day=31)
-# start_date = pd.Timestamp(year=2025, month=8, day=1)
+end_date = pd.Timestamp(year=2024, month=1, day=31)
+start_date = pd.Timestamp(year=2024, month=1, day=1)
 
 
 def get_last_2_month_range():
@@ -87,13 +87,13 @@ def read_artrn(dbf_file_path_artrn):
     ts = time.time()
 
     try:
+        # เปิด table และกำหนด encoding
         table = dbf.Table(filename=dbf_file_path_artrn, codepage='cp874')
         table.open(mode=dbf.READ_ONLY)
 
         result = []
         result_append = result.append
 
-        # อ่านข้อมูลทั้งหมด (ทั้ง IV, OL และ SC, SR, SL)
         for record in table:
             if dbf.is_deleted(record):
                 continue
@@ -102,17 +102,16 @@ def read_artrn(dbf_file_path_artrn):
             if not doc_num or len(doc_num) <= 2:
                 continue
 
-            # เก็บเฉพาะ IV, OL และ SC, SR, SL
             prefix = doc_num[:2]
             if prefix in ['IV', 'CM', 'SC', 'SR', 'OL', 'SL']:
-                # ถ้า SONUM เป็น empty string ให้เป็น None
                 so_num = record.SONUM.strip() if record.SONUM else None
                 if so_num == "":
                     so_num = None
 
+                # ✅ เก็บเฉพาะฟิลด์ที่ต้องการ
                 result_append({
                     'DOCNUM': doc_num,
-                    'DOCDAT': record.DOCDAT,
+                    'DOCDAT': str(record.DOCDAT),
                     'SONUM': so_num,
                     'CUSCOD': str(record.CUSCOD).strip() if record.CUSCOD else None,
                     'AMOUNT': float(record.AMOUNT) if record.AMOUNT else 0.0,
@@ -121,6 +120,8 @@ def read_artrn(dbf_file_path_artrn):
                     'PAYTRM': int(record.PAYTRM) if record.PAYTRM else 0,
                     'DLVBY': str(record.DLVBY).strip() if record.DLVBY else None,
                     'DOCSTAT': str(record.DOCSTAT).strip() if record.DOCSTAT else None,
+                    'BILNUM': str(record.BILNUM).strip() if str(record.BILNUM).strip() != "" and str(record.BILNUM).strip() != "~" else None,
+                    'DUEDAT': str(record.DUEDAT) if record.DUEDAT else None
                 })
 
         table.close()
@@ -174,8 +175,8 @@ def read_artrnrm(dbf_file_path_artrnrm):
         return []
 
 
-def process_artrn_data(records):
-    """ประมวลผลข้อมูล ARTRN โดยกรองเฉพาะ 2 เดือนย้อนหลัง"""
+def process_artrn_data(records, df_customer):
+    """ประมวลผลข้อมูล ARTRN โดยกรองเฉพาะ 2 เดือนย้อนหลัง และ join PAYTRM จาก df_customer"""
     print('Processing ARTRN data...')
 
     try:
@@ -185,44 +186,22 @@ def process_artrn_data(records):
             return pd.DataFrame(), pd.DataFrame()
 
         # แปลง data types
-        df['DOCDAT'] = pd.to_datetime(df['DOCDAT'])
+        df['DOCDAT'] = pd.to_datetime(df['DOCDAT'], errors='coerce')
         df['AMOUNT'] = pd.to_numeric(df['AMOUNT'], errors='coerce').fillna(0.0)
         df['TOTAL'] = pd.to_numeric(df['TOTAL'], errors='coerce').fillna(0.0)
 
-        # รันทีละเดือน
-        # start_date = pd.Timestamp('2025-08-01')
-        # end_date = pd.Timestamp('2025-08-31')
-        # df = df[(df['DOCDAT'] >= start_date) & (df['DOCDAT'] <= end_date)]
-
-        # ย้อนหลัง 2 เดือน
-        # end_date = pd.Timestamp.today()
-        # start_date = (end_date - pd.DateOffset(months=3)).replace(day=1)
+        # ตรวจสอบ start_date, end_date ต้องประกาศมาก่อน (สมมุติใช้ global)
         df = df[(df['DOCDAT'] >= start_date) & (df['DOCDAT'] <= end_date)]
 
         # แยก DataFrame เป็น IV, OL และ SC, SR, SL
         iv_df = df[df['DOCNUM'].str.startswith(('IV', 'OL', 'CM'), na=False)].copy()
-
         sc_sr_df = df[df['DOCNUM'].str.startswith(('SC', 'SR', 'SL'), na=False)].copy()
-
-        # # คำนวณ ตั้งแต่ มกรา 67 เดือนย้อนหลัง
-        # months, years = get_since_2024_JAN()
-
-        # กรอง IV ตามเดือนและปีที่ต้องการ
-        # iv_filtered = pd.DataFrame()
-        # for year in set(years):  # ใช้ set เพื่อไม่ให้ซ้ำ
-        #     year_data = iv_df[iv_df['DOCDAT'].dt.year == year]
-        #     month_data = year_data[year_data['DOCDAT'].dt.month.isin(months)]
-        #     iv_filtered = pd.concat([iv_filtered, month_data])
-        # #
-        # iv_df = iv_filtered
 
         if iv_df.empty:
             print('No IV records found for specified months')
             return pd.DataFrame(), pd.DataFrame()
 
         # Recalculate DISC for IV as AMOUNT - TOTAL
-        iv_df['AMOUNT'] = pd.to_numeric(iv_df['AMOUNT'], errors='coerce').fillna(0.0)
-        iv_df['TOTAL'] = pd.to_numeric(iv_df['TOTAL'], errors='coerce').fillna(0.0)
         iv_df['DISC'] = iv_df['AMOUNT'] - iv_df['TOTAL']
 
         # เก็บเลข IV เต็มๆ สำหรับ match
@@ -241,9 +220,33 @@ def process_artrn_data(records):
 
         print(f'\nFiltered records: IV: {len(iv_df)}, SC|SR: {len(sc_sr_df)}')
 
+        # Join กับ df_customer เพื่อดึง PAYTRM
+        # ตรวจสอบว่า df_customer มีคอลัมน์ 'CUSCOD' และ 'PAYTRM'
+        if 'CUSCOD' in df_customer.columns and 'PAYTRM' in df_customer.columns:
+            iv_df = iv_df.merge(
+                df_customer[['CUSCOD', 'PAYTRM']],
+                on='CUSCOD',
+                how='left',
+                suffixes=('', '_cust')
+            )
+        else:
+            iv_df['PAYTRM'] = None  # ถ้าไม่มีข้อมูลลูกค้า ให้ใส่ None
+
+        # จัดการ BILNUM ให้เป็น None ถ้าว่างหรือเป็น ~
+        iv_df['BILNUM'] = iv_df['BILNUM'].apply(
+            lambda x: str(x).strip() if str(x).strip() not in ["", "~", "None"] else None
+        )
+        assign_sale_area(iv_df)
+
         # จัดเรียง columns ให้ตรงกับ database
-        iv_columns = ['DOCNUM', 'DOCDAT', 'CUSCOD', 'AMOUNT', 'TOTAL', 'DISC', 'DOCSTAT', 'REMAMT', 'PAYTRM', 'DLVBY']
+        iv_columns = ['DOCNUM', 'DOCDAT', 'CUSCOD', 'AMOUNT', 'TOTAL', 'DISC', 'DOCSTAT', 'REMAMT', 'PAYTRM', 'DLVBY', 'BILNUM', 'sale_area', 'DUEDAT']
         sc_sr_columns = ['DOCNUM', 'DOCDAT', 'SONUM', 'CUSCOD', 'AMOUNT', 'TOTAL', 'DOCSTAT']
+
+        # ถ้ามี column ที่ขาดจาก iv_df ให้เติมด้วย None
+        for col in iv_columns:
+            if col not in iv_df.columns:
+                iv_df[col] = None
+
         iv_df = iv_df[iv_columns]
         sc_sr_df = sc_sr_df[sc_sr_columns]
 
@@ -256,54 +259,44 @@ def process_artrn_data(records):
 
 def process_artrnrm(remarks_records):
     """
-    รวม REMARK ตาม DOCNUM (เฉพาะ IV/OL/CM) เรียงตาม SEQNUM แล้ว:
-    - ดึงเลขหลัง '//' (เฉพาะตัวเลขล้วน) มาเป็น so_number (ถ้าหลายค่า คั่นด้วย ',')
-    - ตัดแพทเทิร์น '//ตัวเลข' ออกจากข้อความ REMARK ทั้งหมด
-    - ทำความสะอาดช่องว่าง ซ้ำ/เว้นวรรค/จุลภาคลอย
-    return DataFrame: ['DOCNUM','REMARK','SO_NUMBER']
+    รวม REMARK ตาม DOCNUM (เฉพาะ IV/OL/CM) เรียงตาม SEQNUM
+    - ดึงเลขหลัง '//' ที่มีความยาว >= 6 ตัวเป็น SO_NUMBER
+    - ลบ pattern '//ตัวเลข' ออกจากข้อความ
     """
     if not remarks_records:
         return pd.DataFrame(columns=['DOCNUM', 'REMARK', 'SO_NUMBER'])
 
     df = pd.DataFrame(remarks_records)
-    if 'SEQNUM' in df.columns:
-        df['SEQNUM'] = pd.to_numeric(df['SEQNUM'], errors='coerce').fillna(0).astype(int)
-    else:
-        df['SEQNUM'] = 0
-
+    df['SEQNUM'] = pd.to_numeric(df.get('SEQNUM', 0), errors='coerce').fillna(0).astype(int)
     df['REMARK'] = df['REMARK'].fillna('').astype(str)
 
+    # regex: SO_NUMBER >=6 ตัว
+    pat_so = re.compile(r'//\s*(\d{6,})')
+    pat_rm = re.compile(r'//\s*\d+\b')
+    pat_sp = re.compile(r'\s{2,}')
+    pat_commas = re.compile(r'\s*,\s*')
+
+    df['SO_NUMBER_ROW'] = df['REMARK'].apply(lambda x: pat_so.findall(x))
+    df['REMARK_CLEAN'] = df['REMARK'].apply(lambda x: pat_rm.sub('', x).strip())
+
     df = df.sort_values(['DOCNUM', 'SEQNUM'])
-    grouped = df.groupby('DOCNUM')['REMARK'].apply(
-        lambda x: ' | '.join([s.strip() for s in x if s.strip() != ''])
-    )
 
     out_rows = []
-    pat_num = re.compile(r'//\s*(\d+)')  # จับเลข so_number
-    pat_rm = re.compile(r'//\s*\d+\b')  # สำหรับลบออกจากข้อความ
-    pat_sp = re.compile(r'\s{2,}')  # จัดช่องว่างซ้ำ
-    pat_commas = re.compile(r'\s*,\s*')  # จัดคอมมา
+    for doc, group in df.groupby('DOCNUM'):
+        # รวม remark
+        remark_joined = ' | '.join([r for r in group['REMARK_CLEAN'] if r])
+        remark_joined = pat_sp.sub(' ', remark_joined)
+        remark_joined = pat_commas.sub(', ', remark_joined)
+        if remark_joined == '':
+            remark_joined = None
 
-    for doc, remark_joined in grouped.items():
-        # 1) ดึงเลขหลัง // มาเป็น so_number
-        nums = pat_num.findall(remark_joined)
-        so_number = ','.join([f"SO{n}" for n in dict.fromkeys(nums)]) if nums else None
-
-        # 2) ตัด '//ตัวเลข' ทิ้งจากข้อความ remark
-        remark_wo_so = pat_rm.sub('', remark_joined)
-
-        # 3) เก็บเฉพาะข้อความอื่น (ทำความสะอาดเว้นวรรค/คอมมา)
-        #    - ตัดพื้นที่ว่างเกิน
-        remark_wo_so = pat_sp.sub(' ', remark_wo_so)
-        #    - เคสมีคอมมาคั่นช่องว่างแปลก ๆ ให้ normalize เบา ๆ
-        remark_wo_so = pat_commas.sub(', ', remark_wo_so)
-        remark_wo_so = remark_wo_so.strip()
-        if remark_wo_so == '':
-            remark_wo_so = None
+        # รวม SO_NUMBER
+        nums_flat = [n for sublist in group['SO_NUMBER_ROW'] for n in sublist]
+        so_number = ','.join([f'SO{n}' for n in dict.fromkeys(nums_flat)]) if nums_flat else None
 
         out_rows.append({
             'DOCNUM': doc,
-            'REMARK': remark_wo_so,
+            'REMARK': remark_joined,
             'SO_NUMBER': so_number
         })
 
@@ -403,7 +396,7 @@ def process_stcrd_data(records, iv_numbers, sc_sr_numbers):
         return pd.DataFrame(), pd.DataFrame()
 
 
-def insert_to_sql(iv_df, sc_sr_df, remarks_df=None):
+def insert_to_sql(iv_df, sc_sr_df, remarks_df=None, start_date=None, end_date=None):
     print('Inserting IV and SC, SR to SQL...')
     ts = time.time()
 
@@ -411,32 +404,39 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None):
         engine = get_db_engine()
         df_customer = fetch_customer_name()
 
-        # ---- ผูกชื่อลูกค้าเหมือนเดิม ----
+        # ---- ผูกชื่อลูกค้า + paytrm ----
         iv_df = iv_df.rename(columns={'CUSCOD': 'customer_code'})
         sc_sr_df = sc_sr_df.rename(columns={'CUSCOD': 'customer_code'})
 
-        iv_df = iv_df.merge(df_customer, left_on='customer_code', right_on='cuscod', how='left')
-        sc_sr_df = sc_sr_df.merge(df_customer, left_on='customer_code', right_on='cuscod', how='left')
-
-        iv_df = iv_df.rename(columns={'cusnam': 'customer_name'})
-        sc_sr_df = sc_sr_df.rename(columns={'cusnam': 'customer_name'})
-
-        iv_df['customer_group'] = iv_df.apply(
-            lambda row: row['customer_name'] if pd.notna(row['customer_code']) and str(row['customer_code']).startswith(
-                '3') else row['customer_name'],
-            axis=1
+        iv_df = iv_df.merge(
+            df_customer[['cuscod', 'cusnam', 'paytrm']],
+            left_on='customer_code',
+            right_on='cuscod',
+            how='left'
         )
-        sc_sr_df['customer_group'] = sc_sr_df.apply(
-            lambda row: row['customer_name'] if pd.notna(row['customer_code']) and str(row['customer_code']).startswith(
-                '3') else row['customer_name'],
-            axis=1
+        sc_sr_df = sc_sr_df.merge(
+            df_customer[['cuscod', 'cusnam']],
+            left_on='customer_code',
+            right_on='cuscod',
+            how='left'
         )
 
-        # ---- ผูก REMARK + SO_NUMBER จาก ARTRNRM ----
+        iv_df.rename(columns={'cusnam': 'customer_name'}, inplace=True)
+        sc_sr_df.rename(columns={'cusnam': 'customer_name'}, inplace=True)
+
+        iv_df['paytrm'] = iv_df['paytrm'].fillna(0).astype(int)
+
+        iv_df.drop(columns=['cuscod'], inplace=True)
+        sc_sr_df.drop(columns=['cuscod'], inplace=True)
+
+        iv_df['customer_group'] = iv_df['customer_name']
+        sc_sr_df['customer_group'] = sc_sr_df['customer_name']
+
+        # ---- ผูก REMARK + SO_NUMBER ----
         if remarks_df is not None and not remarks_df.empty:
             iv_df = iv_df.merge(
                 remarks_df.rename(columns={'DOCNUM': 'DOCNUM', 'REMARK': 'remark', 'SO_NUMBER': 'so_number'}),
-                left_on='DOCNUM', right_on='DOCNUM', how='left'
+                on='DOCNUM', how='left'
             )
         else:
             iv_df['remark'] = None
@@ -445,18 +445,19 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None):
         # ------------------ จัดการ IV ------------------ #
         iv_df = iv_df[[
             'DOCNUM', 'DOCDAT', 'customer_code', 'customer_name', 'customer_group',
-            'AMOUNT', 'TOTAL', 'DISC', 'DOCSTAT', 'REMAMT', 'PAYTRM', 'DLVBY',
+            'AMOUNT', 'TOTAL', 'DISC', 'DOCSTAT', 'REMAMT', 'paytrm', 'DLVBY', 'BILNUM', 'sale_area', 'DUEDAT',
             'so_number', 'remark'
         ]]
         iv_df.columns = [
             'doc_number', 'doc_date', 'customer_code', 'customer_name', 'customer_group',
-            'amount', 'total', 'discount', 'doc_stat', 'remamount', 'paytrm', 'dlvby',
+            'amount', 'total', 'discount', 'doc_stat', 'remamount', 'paytrm', 'dlvby', 'bilnum', 'sale_area', 'duedat',
             'so_number', 'remark'
         ]
         iv_df = iv_df.replace({"": None}).where(pd.notnull(iv_df), None)
+        # drop duplicates แน่นอน
         iv_df = iv_df.drop_duplicates(subset=['doc_number'])
 
-        # ------------------ จัดการ SC, SR (เหมือนเดิม) ------------------ #
+        # ------------------ จัดการ SC, SR ------------------ #
         sc_sr_df = sc_sr_df[[
             'DOCNUM', 'DOCDAT', 'SONUM', 'customer_code', 'customer_name', 'customer_group',
             'AMOUNT', 'TOTAL', 'DOCSTAT'
@@ -465,9 +466,8 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None):
                             'customer_name', 'customer_group', 'amount', 'total', 'doc_stat']
         sc_sr_df = sc_sr_df.replace({"": None}).where(pd.notnull(sc_sr_df), None)
 
-        # ------------------ เริ่ม Insert ------------------ #
         with engine.begin() as conn:
-            # สร้าง/ปรับตาราง IV Header: เพิ่ม so_number และขยาย remark เป็น TEXT
+            # Create IV table
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS artrn_iv_header (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -487,39 +487,50 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None):
                     paytrm int(11),
                     dlvby VARCHAR(20),
                     remark TEXT NULL,
+                    bilnum VARCHAR(30),
+                    sale_area_code VARCHAR(10),
+                    duedat DATE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """))
-            # เผื่อบางเครื่อง MySQL ไม่มีคอลัมน์ so_number/remark หรือ remark เป็น VARCHAR — ปรับให้ถูก
-            conn.execute(
-                text("ALTER TABLE artrn_iv_header ADD COLUMN IF NOT EXISTS so_number VARCHAR(100) NULL AFTER doc_date"))
-            conn.execute(text("ALTER TABLE artrn_iv_header MODIFY COLUMN remark TEXT NULL"))
 
-            # ลบช่วงวันที่ที่ต้องการก่อน insert
-            conn.execute(
-                text("""DELETE FROM artrn_iv_header 
-                        WHERE doc_date >= :start_date
-                          AND doc_date <= :end_date
-                """),
-                {"start_date": start_date.date(), "end_date": end_date.date()}
-            )
-
-            # Insert IV (รวม so_number, remark)
-            iv_data = iv_df.to_dict(orient='records')
-            insert_iv_query = text("""
-                INSERT INTO artrn_iv_header (
-                    doc_number, doc_date, so_number, customer_code, customer_name, customer_group,
-                    amount, total, discount, doc_stat, remamount, paytrm, dlvby, remark
-                ) VALUES (
-                    :doc_number, :doc_date, :so_number, :customer_code, :customer_name, :customer_group,
-                    :amount, :total, :discount, :doc_stat, :remamount, :paytrm, :dlvby, :remark
+            # Delete old data ถ้ามี start/end date
+            if start_date and end_date:
+                conn.execute(
+                    text("""DELETE FROM artrn_iv_header 
+                            WHERE doc_date >= :start_date
+                              AND doc_date <= :end_date"""),
+                    {"start_date": start_date.date(), "end_date": end_date.date()}
                 )
-            """)
-            if iv_data:
-                conn.execute(insert_iv_query, iv_data)
-            print(f"Inserted {len(iv_data)} IV records")
 
-            # ตาราง SC/SR header (เหมือนเดิม)
+            # Insert IV with ON DUPLICATE KEY UPDATE
+            iv_data = iv_df.to_dict(orient='records')
+            if iv_data:
+                insert_iv_query = text("""
+                    INSERT INTO artrn_iv_header (
+                        doc_number, doc_date, so_number, customer_code, customer_name, customer_group,
+                        amount, total, discount, doc_stat, remamount, paytrm, dlvby, remark, bilnum, sale_area_code, duedat
+                    ) VALUES (
+                        :doc_number, :doc_date, :so_number, :customer_code, :customer_name, :customer_group,
+                        :amount, :total, :discount, :doc_stat, :remamount, :paytrm, :dlvby, :remark, :bilnum, :sale_area, :duedat
+                    )
+                    ON DUPLICATE KEY UPDATE
+                        amount = VALUES(amount),
+                        total = VALUES(total),
+                        discount = VALUES(discount),
+                        remamount = VALUES(remamount),
+                        paytrm = VALUES(paytrm),
+                        dlvby = VALUES(dlvby),
+                        remark = VALUES(remark),
+                        bilnum = VALUES(bilnum),
+                        sale_area_code = VALUES(sale_area_code),
+                        duedat = VALUES(duedat),
+                        so_number = VALUES(so_number)
+                """)
+                conn.execute(insert_iv_query, iv_data)
+            print(f"Inserted/Updated {len(iv_data)} IV records")
+
+            # Insert SC/SR
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS artrn_sc_sr_header (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -535,13 +546,13 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None):
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """))
-            conn.execute(
-                text("""DELETE FROM artrn_sc_sr_header 
-                        WHERE doc_date >= :start_date
-                          AND doc_date <= :end_date
-                """),
-                {"start_date": start_date.date(), "end_date": end_date.date()}
-            )
+            if start_date and end_date:
+                conn.execute(
+                    text("""DELETE FROM artrn_sc_sr_header 
+                            WHERE doc_date >= :start_date
+                              AND doc_date <= :end_date"""),
+                    {"start_date": start_date.date(), "end_date": end_date.date()}
+                )
             sc_data = sc_sr_df.to_dict(orient='records')
             insert_sc_query = text("""
                 INSERT INTO artrn_sc_sr_header (
@@ -552,7 +563,6 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None):
                     :customer_name, :customer_group, :amount, :total, :doc_stat
                 )
             """)
-
             if sc_data:
                 conn.execute(insert_sc_query, sc_data)
             print(f"Inserted {len(sc_data)} SC/SR records")
@@ -561,7 +571,6 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None):
 
     except Exception as e:
         print(f"Error inserting to SQL: {e}")
-
 
 def insert_details_to_sql(iv_details, sc_sr_details):
     print('Inserting details to SQL...')
@@ -824,117 +833,252 @@ def update_iv_header_detail():
     print("Updating IV ...")
     try:
         engine = get_db_engine()
+
+        # มกรา 67
+        # months, years = get_since_2024_JAN()
+        # start, end = get_month_range(months, years)
+
+        # ย้อนหลัง 2 เดือน
+        # start, end = get_last_2_month_range()
+
         start, end = start_date, end_date
-
         with engine.begin() as conn:
-            print("Allocating SC/SR to IV in SQL (set-based)...")
+            print("Loading IV,OL,CM / SC,SR,SL Detail ...")
 
-            # 1) รวมยอด SC/SR สำหรับช่วงวันที่
-            conn.execute(text("""
-                CREATE TEMPORARY TABLE tmp_sc_totals AS
-                SELECT
-                    SUBSTRING(doc_number, 3, 7) AS base_number,
-                    stkcod,
-                    unit_price,
-                    SUM(trnqty) AS sc_total
-                FROM artrn_sc_sr_detail
-                WHERE doc_date >= :start AND doc_date <= :end
-                GROUP BY SUBSTRING(doc_number, 3, 7), stkcod, unit_price;
-            """), {"start": start.date(), "end": end.date()})
+            # Load IV, OL and SC, SR, SL detail from DB
+            iv_detail = pd.read_sql(text("""
+                           SELECT id, doc_number, doc_date, stkcod, trnqty, unit_price, cost, qty_balance,
+                                  COALESCE(qty_sc_sr_deducted, 0) AS qty_sc_sr_deducted
+                           FROM artrn_iv_detail
+                           WHERE doc_date >= :start AND doc_date <= :end
+                       """), conn, params={"start": start.date(), "end": end.date()})
 
-            conn.execute(text("CREATE INDEX ix_tmp_sc ON tmp_sc_totals (base_number, stkcod, unit_price)"))
+            sc_sr_detail = pd.read_sql(text("""
+                           SELECT doc_number, doc_date, stkcod, trnqty, unit_price
+                           FROM artrn_sc_sr_detail
+                           WHERE doc_date >= :start AND doc_date <= :end
+                       """), conn, params={"start": start.date(), "end": end.date()})
 
-            # 2) คำนวณคิวสะสมของ IV ต่อ key และแจกแจงยอดที่หักต่อบรรทัด (allocation)
-            # ใช้ window function บน MySQL 8+
-            conn.execute(text("""
-                CREATE TEMPORARY TABLE tmp_iv_alloc AS
-                WITH iv AS (
-                    SELECT
-                        d.id,
-                        d.doc_number,
-                        d.doc_date,
-                        SUBSTRING(d.doc_number, 3, 7) AS base_number,
-                        d.stkcod,
-                        d.unit_price,
-                        d.trnqty,
-                        SUM(d.trnqty) OVER (
-                            PARTITION BY SUBSTRING(d.doc_number, 3, 7), d.stkcod, d.unit_price
-                            ORDER BY d.id
-                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                        ) AS cum_iv
-                    FROM artrn_iv_detail d
-                    WHERE d.doc_date >= :start AND d.doc_date <= :end
-                ),
-                joined AS (
-                    SELECT
-                        iv.*,
-                        COALESCE(sc.sc_total, 0) AS sc_total
-                    FROM iv
-                    LEFT JOIN tmp_sc_totals sc
-                      ON sc.base_number = iv.base_number
-                     AND sc.stkcod     = iv.stkcod
-                     AND sc.unit_price = iv.unit_price
-                )
-                SELECT
-                    id, doc_number, doc_date, base_number, stkcod, unit_price, trnqty, sc_total,
-                    GREATEST(LEAST(cum_iv, sc_total) - LEAST(cum_iv - trnqty, sc_total), 0) AS qty_sc_sr_deducted,
-                    CASE WHEN GREATEST(LEAST(cum_iv, sc_total) - LEAST(cum_iv - trnqty, sc_total), 0) > 0
-                         THEN unit_price ELSE NULL END AS unit_price_from_sc_sr
-                FROM joined;
+            # เตรียม base_number
+            iv_detail['base_number'] = iv_detail['doc_number'].str[2:9]
+            sc_sr_detail['base_number'] = sc_sr_detail['doc_number'].str[2:9]
 
-            """), {"start": start.date(), "end": end.date()})
+            # Clean description
+            def get_description_column(df):
+                for col in ['description', 'item_desc', 'desc', 'item_name']:
+                    if col in df.columns:
+                        return df[col].astype(str).str.strip()
+                return pd.Series([""] * len(df))
 
-            conn.execute(text("CREATE INDEX ix_tmp_iv_alloc ON tmp_iv_alloc (id)"))
+            def normalize_description_column(series):
+                return series.astype(str).apply(
+                    lambda x: unicodedata.normalize('NFKC', x)
+                ).str.replace(r'\s+', ' ', regex=True).str.strip()
 
-            # 3) อัปเดตกลับเข้า artrn_iv_detail
-            conn.execute(text("""
-                UPDATE artrn_iv_detail d
-                JOIN tmp_iv_alloc a ON a.id = d.id
-                SET
-                  d.qty_sc_sr_deducted = a.qty_sc_sr_deducted,
-                  d.qty_balance = GREATEST(d.trnqty - a.qty_sc_sr_deducted, 0),
-                  d.unit_price_from_sc_sr = a.unit_price_from_sc_sr
-                WHERE d.doc_date >= :start AND d.doc_date <= :end;
-            """), {"start": start.date(), "end": end.date()})
+            iv_detail['description'] = normalize_description_column(get_description_column(iv_detail))
+            sc_sr_detail['description'] = normalize_description_column(get_description_column(sc_sr_detail))
 
-            # 4) อัปเดต IV Header (ต้นทุนรวม + สถานะ) แบบรวดเดียว ไม่ต้อง batch ทีละ 1000
-            conn.execute(text("""
-                UPDATE artrn_iv_header h
-                JOIN (
-                    SELECT
-                        d.doc_number,
-                        SUM(COALESCE(d.cost, 0) * COALESCE(d.qty_balance, 0)) AS calculated_cost_total,
-                        CASE
-                          WHEN COALESCE(SUM(d.qty_balance),0) = 0 THEN 2
-                          WHEN SUM(CASE
-                                      WHEN d.cost = 0 AND d.qty_balance > 0 AND d.stkcod NOT IN (
-                                        SELECT sc.stkcod FROM artrn_ol_stkcod_check sc
-                                      )
-                                   THEN 1 ELSE 0 END) = 0 THEN 1
-                          ELSE 0
-                        END AS calculated_status
-                    FROM artrn_iv_detail d
-                    WHERE d.doc_date >= :start AND d.doc_date <= :end
-                    GROUP BY d.doc_number
-                ) ds ON h.doc_number = ds.doc_number
-                SET
-                  h.cost_total = ds.calculated_cost_total,
-                  h.status = ds.calculated_status
-                WHERE h.doc_date >= :start AND h.doc_date <= :end;
-            """), {"start": start.date(), "end": end.date()})
+            iv_detail['key'] = iv_detail['base_number'] + "|" + iv_detail['stkcod'] + "|" + iv_detail['description']
+            sc_sr_detail['key'] = sc_sr_detail['base_number'] + "|" + sc_sr_detail['stkcod'] + "|" + sc_sr_detail[
+                'description']
 
-            print("Finished updating IV header/detail (set-based).")
+            # รวม qty SC, SR ตาม key
+            sc_sr_grouped = sc_sr_detail.groupby('key')['trnqty'].sum().to_dict()
+
+            # เตรียมฟิลด์ที่จะอัปเดต
+            iv_detail['qty_sc_sr_deducted'] = 0.0
+            iv_detail['qty_balance'] = iv_detail['trnqty']
+            iv_detail['unit_price_from_sc_sr'] = None
+            sc_sr_detail['remaining_qty'] = sc_sr_detail['trnqty']
+
+            for i, row in iv_detail.iterrows():
+                key = row['key']
+                iv_qty = row['trnqty']
+                iv_price = row['unit_price']
+                qty_deducted = 0.0
+                unit_price_matched = None
+
+                matching_sc_sr = sc_sr_detail[
+                    (sc_sr_detail['key'] == key) &
+                    (sc_sr_detail['remaining_qty'] > 0) &
+                    (sc_sr_detail['unit_price'] == iv_price)
+                    ]
+
+                for j, sc_sr_row in matching_sc_sr.iterrows():
+                    if qty_deducted >= iv_qty:
+                        break
+
+                    sc_sr_available = sc_sr_row['remaining_qty']
+                    to_deduct = min(sc_sr_available, iv_qty - qty_deducted)
+
+                    if to_deduct > 0:
+                        sc_sr_detail.at[j, 'remaining_qty'] -= to_deduct
+                        qty_deducted += to_deduct
+
+                        if unit_price_matched is None:
+                            unit_price_matched = sc_sr_row['unit_price']
+
+                iv_detail.at[i, 'qty_sc_sr_deducted'] = qty_deducted
+                iv_detail.at[i, 'qty_balance'] = iv_qty - qty_deducted
+                iv_detail.at[i, 'unit_price_from_sc_sr'] = unit_price_matched
+
+            print("Updating IV Detail to DB ...")
+            for _, row in iv_detail.iterrows():
+                conn.execute(text("""
+                    UPDATE artrn_iv_detail
+                    SET qty_sc_sr_deducted = :deducted,
+                        qty_balance = :balance,
+                        unit_price_from_sc_sr = :unit_price
+                    WHERE id = :id
+                """), {
+                    "deducted": row['qty_sc_sr_deducted'],
+                    "balance": row['qty_balance'],
+                    "unit_price": row['unit_price_from_sc_sr'],
+                    "id": row['id']
+                })
+
+            print("Updating IV Header in batches ...")
+            BATCH_SIZE = 1000
+            doc_numbers = pd.read_sql("SELECT DISTINCT doc_number FROM artrn_iv_detail", conn)[
+                'doc_number'].tolist()
+
+            for i in range(0, len(doc_numbers), BATCH_SIZE):
+                batch_docs = doc_numbers[i:i + BATCH_SIZE]
+                conn.execute(text("""
+                    UPDATE artrn_iv_header h
+                    JOIN (
+                        SELECT
+                            d.doc_number,
+                            SUM(COALESCE(d.cost, 0.0) * COALESCE(d.qty_balance, 0.0)) AS calculated_cost_total,
+                            iv.total AS iv_total,
+                            sc_sr_group.sc_sr AS sc_sr_total,
+                            CASE
+                                WHEN COALESCE(SUM(d.qty_balance), 0) = 0 THEN 2
+                                WHEN SUM(CASE
+                                            WHEN d.cost = 0 AND d.qty_balance > 0 AND d.stkcod NOT IN (
+                                                SELECT sc.stkcod FROM artrn_ol_stkcod_check sc
+                                            )
+                                            THEN 1
+                                            ELSE 0
+                                        END) = 0 THEN 1
+                                ELSE 0
+                            END AS calculated_status
+                        FROM artrn_iv_detail d
+                        LEFT JOIN artrn_iv_header iv ON iv.doc_number = d.doc_number
+                        LEFT JOIN (
+                            SELECT
+                                SUBSTRING(sc_sr.doc_number, 3, 7) AS base_number,
+                                SUM(sc_sr.total) AS sc_sr
+                            FROM artrn_sc_sr_header sc_sr
+                            GROUP BY base_number
+                        ) sc_sr_group ON sc_sr_group.base_number = SUBSTRING(d.doc_number, 3, 7)
+                        WHERE d.doc_number IN :batch
+                        GROUP BY d.doc_number
+                    ) ds ON h.doc_number = ds.doc_number
+                    SET
+                        h.cost_total = ds.calculated_cost_total,
+                        h.status = ds.calculated_status
+                """), {"batch": tuple(batch_docs)})
+
+            # เซต status = 0 ถ้า NULL
+            conn.execute(text("UPDATE artrn_iv_header SET status = 0 WHERE status IS NULL"))
+
+            print("Finished updating IV header.")
 
     except Exception as e:
         print(f"Error update iv header: {e}")
 
 
+def assign_sale_area(iv_df):
+    """
+    iv_df: DataFrame ของ IV ที่มีฟิลด์ 'cuscod'
+    """
+    # ดึงข้อมูล sale_area table
+    sale_area_df = fetch_check_sale_area()
+
+    # เรียงให้ cuscod_startwith ยาวสุดก่อน (กรณี prefix ซ้อนกัน)
+    sale_area_df = sale_area_df.sort_values('cuscod_startwith', key=lambda x: x.str.len(), ascending=False)
+
+    # ฟังก์ชันหาค่า sale_area สำหรับ cuscod แต่ละตัว
+    def get_sale_area(cuscod):
+        for _, row in sale_area_df.iterrows():
+            if cuscod.startswith(row['cuscod_startwith']):
+                return row['sale_area']
+        return None  # ถ้าไม่ match
+
+    # สร้างคอลัมน์ใหม่
+    iv_df['sale_area'] = iv_df['CUSCOD'].apply(get_sale_area)
+    return iv_df
+
+
 def fetch_customer_name():
     engine = get_db_engine()
     with engine.connect() as conn:
-        df = pd.read_sql("SELECT cuscod, cusnam FROM ex_customer", conn)
+        df = pd.read_sql("SELECT cuscod, cusnam, paytrm FROM ex_customer", conn)
     return df
 
+def fetch_check_sale_area():
+    engine = get_db_engine()
+    with engine.connect() as conn:
+        df = pd.read_sql("SELECT sale_area, cuscod_startwith FROM artrn_iv_check_sale_area", conn)
+    return df
+
+def _to_pydate(x):
+    if pd.isna(x):
+        return None
+    if isinstance(x, dt.date) and not isinstance(x, dt.datetime):
+        return x
+    if isinstance(x, (pd.Timestamp, dt.datetime)):
+        return x.date()
+    # เผื่อมาเป็นสตริง
+    return pd.to_datetime(x, errors='coerce').date()
+
+def update_duedat_by_bill():
+    """
+    อัปเดต DUEDAT ของ IV, CM, OL ตาม BILNUM
+    วิธีทำ:
+      1) GROUP BY bilnum
+      2) หาค่า MAX(doc_date) ของแต่ละบิล
+      3) + paytrm ของลูกค้า (field ที่ insert ลงตอนแรก)
+      4) UPDATE กลับตาราง artrn_iv_header
+    """
+    print("Updating DUEDAT for IV grouped by BILNUM...")
+
+    try:
+        engine = get_db_engine()
+
+        # ดึง MAX(doc_date) และ paytrm ต่อ bilnum
+        df = pd.read_sql("""
+            SELECT bilnum, MAX(doc_date) AS max_doc_date, MAX(paytrm) AS paytrm
+            FROM artrn_iv_header
+            WHERE LEFT(doc_number, 2) IN ('IV', 'CM', 'OL')
+              AND bilnum IS NOT NULL
+              AND bilnum <> ''
+              AND bilnum <> '~'
+            GROUP BY bilnum
+        """, engine)
+
+        if df.empty:
+            print("No IV records with valid BILNUM to update.")
+            return
+
+        with engine.begin() as conn:
+            for _, row in df.iterrows():
+                max_date = row['max_doc_date']
+                paytrm_days = int(row['paytrm']) if row['paytrm'] else 0
+                duedat = max_date + pd.Timedelta(days=paytrm_days)
+
+                conn.execute(text("""
+                    UPDATE artrn_iv_header
+                    SET duedat = :duedat
+                    WHERE bilnum = :bilnum
+                      AND LEFT(doc_number, 2) IN ('IV', 'CM', 'OL')
+                """), {"duedat": duedat, "bilnum": row['bilnum']})
+
+        print(f"DUEDAT update completed for {len(df)} bill groups.")
+
+    except Exception as e:
+        print(f"Error updating DUEDAT by BILNUM: {e}")
 
 def task():
     print('======= TASK =======')
@@ -942,10 +1086,11 @@ def task():
 
     # อ่านข้อมูล ARTRN (header ดิบ)
     records = read_artrn(dbf_file_path_artrn)
+    df_customer = fetch_customer_name()
 
     if records:
         # ประมวลผล header (IV/OL/CM, SC/SR/SL) ตามช่วงวันที่
-        iv_df, sc_sr_df = process_artrn_data(records)
+        iv_df, sc_sr_df = process_artrn_data(records, df_customer)
 
         if not iv_df.empty or not sc_sr_df.empty:
             # อ่าน REMARK จาก ARTRNRM แล้วประมวลผล
@@ -958,7 +1103,7 @@ def task():
 
             # บันทึก header (ส่ง remarks_df เข้าไป)
             insert_to_sql(iv_df, sc_sr_df, remarks_df=remarks_df)
-
+            # update_duedat_by_bill()
             # อ่านและประมวลผล detail
             detail_records = read_stcrd(dbf_file_path_stcrd, iv_numbers, sc_sr_numbers)
 

@@ -33,12 +33,8 @@ def _to_dt(s):
     return pd.to_datetime(s, errors="coerce").dt.normalize()
 
 def add_date_column_inplace(df):
-    """Vectorized version of pick_date: date = payindat or trndat or docdat"""
-    n = len(df)
-    payin = df["payindat"] if "payindat" in df.columns else pd.Series([pd.NaT]*n)
-    trn   = df["trndat"]   if "trndat"   in df.columns else pd.Series([pd.NaT]*n)
-    doc   = df["docdat"]   if "docdat"   in df.columns else pd.Series([pd.NaT]*n)
-    df["date"] = payin.fillna(trn).fillna(doc)
+    """เปลี่ยนให้ใช้แค่ trndat เป็น date"""
+    df["date"] = df["trndat"]
 
 # -----------------------------
 # READ DBF (faster)
@@ -54,9 +50,10 @@ def read_dbf(path, codepage="cp874", use_fields=None):
     table.close()
     return pd.DataFrame.from_records(records, columns=use_fields)
 
-def process_aptrn_artrn(file_path, doc_prefixes, type_label, use_fields=None):
+def process_aptrn_artrn(file_path, doc_prefixes, type_label, use_fields=None, is_ap=False):
     print('--- process_aptrn_artrn ---')
     df = read_dbf(file_path, use_fields=use_fields)
+
     # to datetime
     df["docdat"] = _to_dt(df.get("DOCDAT"))
     if "DOCDAT" in df.columns:
@@ -70,7 +67,19 @@ def process_aptrn_artrn(file_path, doc_prefixes, type_label, use_fields=None):
 
     df["type"] = type_label  # in/out
     df.columns = [c.lower() for c in df.columns]
+
+    # ✅ แยก AP/AR
+    if is_ap:
+        if "supcod" not in df.columns:
+            df["supcod"] = None
+        df["cuscod"] = None
+    else:
+        if "cuscod" not in df.columns:
+            df["cuscod"] = None
+        df["supcod"] = None
+
     return df
+
 
 def process_bktrn():
     print('--- process_bktrn ---')
@@ -137,7 +146,7 @@ def prepare_final_df(merged_df):
     # vectorized date
     add_date_column_inplace(df)
 
-    expected_cols = ["docnum", "docdat", "type", "cuscod", "chqnum",
+    expected_cols = ["docnum", "docdat", "type", "cuscod", "supcod", "chqnum",
                      "trndat", "bnkacc", "payindat", "net_amt", "date",
                      "chqdat", "remark"]
 
@@ -149,8 +158,8 @@ def prepare_final_df(merged_df):
 
     final_df = df[expected_cols].copy()
 
-    # enforce Nones (ไม่แปลง dtype ให้พัง)
-    for col in ["docnum", "type", "cuscod", "chqnum", "bnkacc", "remark"]:
+    # enforce Nones
+    for col in ["docnum", "type", "cuscod", "supcod", "chqnum", "bnkacc", "remark"]:
         final_df.loc[:, col] = final_df[col].where(pd.notnull(final_df[col]), None)
 
     for col in ["docdat", "trndat", "payindat", "date", "chqdat"]:
@@ -159,6 +168,7 @@ def prepare_final_df(merged_df):
     final_df.loc[:, "net_amt"] = final_df["net_amt"].where(pd.notnull(final_df["net_amt"]), None)
 
     return final_df
+
 
 def process_bkmas():
     print('--- process_bkmas ---')
@@ -176,7 +186,12 @@ def process_bkmas():
     _strip_object_columns_inplace(df)
     return df
 
-def process_bktrn_bt(file_path):
+def process_bktrn_bt(file_path, artrn_df):
+    """
+    Process BKTRN สำหรับ CHQNUM เริ่มด้วย BT
+    - ใส่ cuscod จาก ARTRN
+    - supcod = None
+    """
     print('--- process_bktrn_bt ---')
     df = read_dbf(file_path)
 
@@ -192,20 +207,21 @@ def process_bktrn_bt(file_path):
     # map type
     if "BKTRNTYP" not in df.columns:
         df["BKTRNTYP"] = None
-    df["TYPE"] = df["BKTRNTYP"].apply(lambda x: "out" if x=="BT" else ("in" if isinstance(x,str) and x.startswith("B") else None))
+    df["TYPE"] = df["BKTRNTYP"].apply(
+        lambda x: "out" if x == "BT" else ("in" if isinstance(x, str) and x.startswith("B") else None)
+    )
 
     # normalize dates
-    df["TRNDAT"]  = _to_dt(df.get("TRNDAT"))
-    df["CHQDAT"]  = _to_dt(df.get("CHQDAT"))
+    df["TRNDAT"] = _to_dt(df.get("TRNDAT"))
+    df["CHQDAT"] = _to_dt(df.get("CHQDAT"))
     df["PAYINDAT"] = _to_dt(df.get("PAYINDAT"))
 
     # filter by TRNDAT
     df = df[df["TRNDAT"].dt.date >= start_date].copy()
 
-    # สร้าง DATE: payindat > trndat
-    payin = df["PAYINDAT"] if "PAYINDAT" in df.columns else pd.Series([pd.NaT]*len(df))
-    trn   = df["TRNDAT"]  if "TRNDAT"  in df.columns else pd.Series([pd.NaT]*len(df))
-    df["DATE"] = payin.fillna(trn)
+    # ใช้ rule ใหม่
+    df["DATE"] = df["TRNDAT"]   # default ใช้ trndat
+    df.loc[df["TYPE"] == "in", "DATE"] = df.loc[df["TYPE"] == "in", "CHQDAT"]
 
     # เติมคอลัมน์ที่ DB ต้องการแต่ BKTRN ไม่มี
     for c in ["BNKACC", "NETAMT", "REMARK", "DOCDAT"]:
@@ -218,6 +234,7 @@ def process_bktrn_bt(file_path):
         "DOCDAT": "docdat",
         "TYPE": "type",
         "CHQNUM": "chqnum",
+        "CUSCOD": "cuscod",  # จะ map จาก ARTRN ต่อไป
         "TRNDAT": "trndat",
         "BNKACC": "bnkacc",
         "PAYINDAT": "payindat",
@@ -227,16 +244,18 @@ def process_bktrn_bt(file_path):
         "REMARK": "remark",
     })
 
-    df["cuscod"] = None
+    # map cuscod จาก ARTRN
+    if not artrn_df.empty:
+        df = df.merge(artrn_df[['docnum', 'cuscod']], on='docnum', how='left', suffixes=('', '_from_artrn'))
+        df['cuscod'] = df['cuscod'].combine_first(df['cuscod_from_artrn'])
+        df = df.drop(columns=['cuscod_from_artrn'])
 
-    df = df[[
-        "docnum", "docdat", "type", "cuscod",
-        "chqnum", "trndat", "bnkacc", "payindat",
-        "net_amt", "date", "chqdat", "remark"
-    ]]
+    # BT ไม่มี supcod
+    df['supcod'] = None
 
     _strip_object_columns_inplace(df)
     df = df.where(pd.notnull(df), None)
+
     return df
 
 
@@ -259,8 +278,8 @@ def insert_to_db(df, table_name):
 
             sql = text("""
                 INSERT INTO ap_artrn_table
-                (docnum, docdat, type, cuscod, chqnum, trndat, bnkacc, payindat, net_amt, date, chqdat, remark, created_at)
-                VALUES (:docnum, :docdat, :type, :cuscod, :chqnum, :trndat, :bnkacc, :payindat, :net_amt, :date, :chqdat, :remark, :now)
+                (docnum, docdat, type, cuscod, supcod, chqnum, trndat, bnkacc, payindat, net_amt, date, chqdat, remark, created_at)
+                VALUES (:docnum, :docdat, :type, :cuscod, :supcod, :chqnum, :trndat, :bnkacc, :payindat, :net_amt, :date, :chqdat, :remark, :now)
             """)
 
             data = df.to_dict(orient="records")
@@ -290,8 +309,8 @@ def task():
     ts = time.time()
 
     # AP/AR ใช้ table เดียวกัน
-    aptrn_df = process_aptrn_artrn(dbf_file_aptrn, ("HI", "HP", "PS", "PN"), "out")
-    artrn_df = process_aptrn_artrn(dbf_file_artrn, ("RE", "RC", "RD", "RM", "AI", "AC"), "in")
+    aptrn_df = process_aptrn_artrn(dbf_file_aptrn, ("HI", "HP", "PS", "PN"), "out", is_ap=True)
+    artrn_df = process_aptrn_artrn(dbf_file_artrn, ("RE", "RC", "RD", "RM", "AI", "AC"), "in", is_ap=False)
     bktrn_df = process_bktrn()
 
     merged_aptrn = merge_with_bktrn(aptrn_df, bktrn_df)
@@ -304,7 +323,7 @@ def task():
     combined_df = pd.concat([final_aptrn, final_artrn], ignore_index=True)
 
     # BKTRN BT
-    bktrn_bt_df = process_bktrn_bt(dbf_file_bktrn)
+    bktrn_bt_df = process_bktrn_bt(dbf_file_bktrn, final_artrn)
     if not bktrn_bt_df.empty:
         combined_df = pd.concat([combined_df, bktrn_bt_df], ignore_index=True)
 
