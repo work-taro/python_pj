@@ -23,7 +23,7 @@ dbf_file_path_artrnrm = 'C:/Users/kc/desktop/DBF/ARTRNRM.DBF'
 # start_date = (end_date - pd.DateOffset(months=2)).replace(day=1)
 
 
-end_date = pd.Timestamp(year=2024, month=1, day=31)
+end_date = pd.Timestamp(year=2024, month=6, day=30)
 start_date = pd.Timestamp(year=2024, month=1, day=1)
 
 
@@ -260,9 +260,18 @@ def process_artrn_data(records, df_customer):
 def process_artrnrm(remarks_records):
     """
     รวม REMARK ตาม DOCNUM (เฉพาะ IV/OL/CM) เรียงตาม SEQNUM
-    - ดึงเลขหลัง '//' ที่มีความยาว >= 6 ตัวเป็น SO_NUMBER
-    - ลบ pattern '//ตัวเลข' ออกจากข้อความ
+
+    กติกาใหม่:
+    - ถ้ามีเลขยาวหลัง '//' (>= 6 หลัก) เช่น //2401018587
+        -> ใช้เฉพาะเลขยาว (เต็มตัว) ตามลำดับที่เจอ และ *ไม่ใช้* เลขสั้นเลย
+    - ถ้า *ไม่มี* เลขยาว
+        -> ค่อย fallback ไปใช้เลขสั้นแบบ //2) //4) เป็น SO2, SO4, ...
+
+    นอกจากนี้ ลบแพทเทิร์น "//ตัวเลข" และ "//ตัวเลข)" ออกจากข้อความ REMARK ที่รวมแล้ว
     """
+    import re
+    import pandas as pd
+
     if not remarks_records:
         return pd.DataFrame(columns=['DOCNUM', 'REMARK', 'SO_NUMBER'])
 
@@ -270,33 +279,67 @@ def process_artrnrm(remarks_records):
     df['SEQNUM'] = pd.to_numeric(df.get('SEQNUM', 0), errors='coerce').fillna(0).astype(int)
     df['REMARK'] = df['REMARK'].fillna('').astype(str)
 
-    # regex: SO_NUMBER >=6 ตัว
-    pat_so = re.compile(r'//\s*(\d{6,})')
-    pat_rm = re.compile(r'//\s*\d+\b')
+    # --- regex ---
+    # สั้น: //  <digits> )
+    pat_short = re.compile(r'//\s*(\d+)\)')
+    # ยาว:  //  <digits{6,}>  (เช่น 2401018587) รองรับจบด้วยวรรค/ปิดวงเล็บ/จบสตริง
+    pat_long  = re.compile(r'//\s*(\d{6,})(?=$|\s|\))')
+
+    # สำหรับลบออกจากข้อความ (ทั้งแบบสั้นและยาว)
+    pat_rm = re.compile(r'//\s*\d+\)?')
+    # จัดช่องว่าง/คอมมา
     pat_sp = re.compile(r'\s{2,}')
     pat_commas = re.compile(r'\s*,\s*')
 
-    df['SO_NUMBER_ROW'] = df['REMARK'].apply(lambda x: pat_so.findall(x))
-    df['REMARK_CLEAN'] = df['REMARK'].apply(lambda x: pat_rm.sub('', x).strip())
+    def extract_tokens(text: str):
+        """คืน (long_tokens, short_tokens) โดยรักษาลำดับที่เจอ"""
+        longs, shorts = [], []
+        for m in pat_long.finditer(text):
+            longs.append(m.group(1))   # '2401018587'
+        for m in pat_short.finditer(text):
+            shorts.append(m.group(1))  # '2', '4', ...
+        return longs, shorts
 
     df = df.sort_values(['DOCNUM', 'SEQNUM'])
 
     out_rows = []
     for doc, group in df.groupby('DOCNUM'):
-        # รวม remark
-        remark_joined = ' | '.join([r for r in group['REMARK_CLEAN'] if r])
-        remark_joined = pat_sp.sub(' ', remark_joined)
-        remark_joined = pat_commas.sub(', ', remark_joined)
-        if remark_joined == '':
-            remark_joined = None
+        remarks = [r for r in group['REMARK'] if r]
 
-        # รวม SO_NUMBER
-        nums_flat = [n for sublist in group['SO_NUMBER_ROW'] for n in sublist]
-        so_number = ','.join([f'SO{n}' for n in dict.fromkeys(nums_flat)]) if nums_flat else None
+        long_tokens_in_order, short_tokens_in_order = [], []
+        for r in remarks:
+            L, S = extract_tokens(r)
+            long_tokens_in_order.extend(L)
+            short_tokens_in_order.extend(S)
+
+        # dedupe แบบรักษาลำดับ
+        def unique_order(seq):
+            return list(dict.fromkeys(seq))
+
+        so_number = None
+        if long_tokens_in_order:
+            # มีเลขยาว -> ใช้เลขยาวเท่านั้น (เต็มตัว)
+            longs = unique_order(long_tokens_in_order)
+            # ถ้าอยากเอาเฉพาะตัวแรก: so_number = f"SO{longs[0]}"
+            # ถ้าอยากต่อหลายตัว: 'SO123,SO456'
+            so_number = f"SO{longs[0]}"
+        elif short_tokens_in_order:
+            shorts = unique_order(short_tokens_in_order)
+            so_number = ','.join(f"SO{s}" for s in shorts)
+        else:
+            so_number = None
+
+        # ทำความสะอาดข้อความ remark รวม
+        cleaned = ' | '.join(remarks) if remarks else ''
+        cleaned = pat_rm.sub('', cleaned).strip()
+        cleaned = pat_sp.sub(' ', cleaned)
+        cleaned = pat_commas.sub(', ', cleaned)
+        if cleaned == '':
+            cleaned = None
 
         out_rows.append({
             'DOCNUM': doc,
-            'REMARK': remark_joined,
+            'REMARK': cleaned,
             'SO_NUMBER': so_number
         })
 
@@ -396,7 +439,13 @@ def process_stcrd_data(records, iv_numbers, sc_sr_numbers):
         return pd.DataFrame(), pd.DataFrame()
 
 
-def insert_to_sql(iv_df, sc_sr_df, remarks_df=None, start_date=None, end_date=None):
+def insert_to_sql(iv_df, sc_sr_df, remarks_df=None, start_date=None, end_date=None, purge="range"):
+    """
+    purge:
+      - "range"  : ลบข้อมูลเดิมในช่วงวันที่ [start_date, end_date] แล้วค่อย insert ใหม่ (แนะนำ)
+      - "all"    : ลบทั้งตารางก่อน (ระวัง)
+      - "none"   : ไม่ลบ ใช้ upsert ทับเฉพาะรายการที่ชน UNIQUE (พฤติกรรมเดิม)
+    """
     print('Inserting IV and SC, SR to SQL...')
     ts = time.time()
 
@@ -454,7 +503,6 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None, start_date=None, end_date=No
             'so_number', 'remark'
         ]
         iv_df = iv_df.replace({"": None}).where(pd.notnull(iv_df), None)
-        # drop duplicates แน่นอน
         iv_df = iv_df.drop_duplicates(subset=['doc_number'])
 
         # ------------------ จัดการ SC, SR ------------------ #
@@ -494,18 +542,54 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None, start_date=None, end_date=No
                 )
             """))
 
-            # Delete old data ถ้ามี start/end date
-            if start_date and end_date:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS artrn_sc_sr_header (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    doc_number VARCHAR(50),
+                    doc_date DATE,
+                    so_number VARCHAR(50) NULL,
+                    customer_code VARCHAR(50),
+                    customer_name TEXT NULL,
+                    customer_group TEXT NULL,
+                    amount DECIMAL(15, 2),
+                    total DECIMAL(15, 2),
+                    doc_stat VARCHAR(10),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+
+            # ---------- PURGE PHASE: ลบข้อมูลเดิม ----------
+            if purge == "all":
+                # ลบทั้งตาราง (ระวังใช้งานเฉพาะตอน full rebuild)
+                conn.execute(text("TRUNCATE TABLE artrn_iv_header"))
+                conn.execute(text("TRUNCATE TABLE artrn_sc_sr_header"))
+                print("Purged: TRUNCATE artrn_iv_header, artrn_sc_sr_header")
+
+            elif purge == "range":
+                if not (start_date and end_date):
+                    raise ValueError("purge='range' ต้องส่ง start_date และ end_date เข้ามาด้วย")
+
                 conn.execute(
                     text("""DELETE FROM artrn_iv_header 
-                            WHERE doc_date >= :start_date
-                              AND doc_date <= :end_date"""),
+                            WHERE doc_date >= :start_date AND doc_date <= :end_date"""),
                     {"start_date": start_date.date(), "end_date": end_date.date()}
                 )
+                conn.execute(
+                    text("""DELETE FROM artrn_sc_sr_header 
+                            WHERE doc_date >= :start_date AND doc_date <= :end_date"""),
+                    {"start_date": start_date.date(), "end_date": end_date.date()}
+                )
+                print(f"Purged by range: {start_date.date()} to {end_date.date()}")
 
-            # Insert IV with ON DUPLICATE KEY UPDATE
+            else:
+                # "none" = ไม่ลบ (คงพฤติกรรม upsert เดิม)
+                print("Purge skipped (mode='none'). Using upsert only.")
+
+            # ---------- INSERT PHASE ----------
             iv_data = iv_df.to_dict(orient='records')
             if iv_data:
+                # ถ้าลบก่อนแล้ว จะใช้ INSERT ธรรมดาหรือ UPSERT ก็ได้
+                # เก็บ upsert ไว้เพื่อความยืดหยุ่น/กันกรณีซ้ำบาง doc_number
                 insert_iv_query = text("""
                     INSERT INTO artrn_iv_header (
                         doc_number, doc_date, so_number, customer_code, customer_name, customer_group,
@@ -528,43 +612,21 @@ def insert_to_sql(iv_df, sc_sr_df, remarks_df=None, start_date=None, end_date=No
                         so_number = VALUES(so_number)
                 """)
                 conn.execute(insert_iv_query, iv_data)
-            print(f"Inserted/Updated {len(iv_data)} IV records")
 
-            # Insert SC/SR
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS artrn_sc_sr_header (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    doc_number VARCHAR(50),
-                    doc_date DATE,
-                    so_number VARCHAR(50) NULL,
-                    customer_code VARCHAR(50),
-                    customer_name TEXT NULL,
-                    customer_group TEXT NULL,
-                    amount DECIMAL(15, 2),
-                    total DECIMAL(15, 2),
-                    doc_stat VARCHAR(10),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            if start_date and end_date:
-                conn.execute(
-                    text("""DELETE FROM artrn_sc_sr_header 
-                            WHERE doc_date >= :start_date
-                              AND doc_date <= :end_date"""),
-                    {"start_date": start_date.date(), "end_date": end_date.date()}
-                )
             sc_data = sc_sr_df.to_dict(orient='records')
-            insert_sc_query = text("""
-                INSERT INTO artrn_sc_sr_header (
-                    doc_number, doc_date, so_number, customer_code,
-                    customer_name, customer_group, amount, total, doc_stat
-                ) VALUES (
-                    :doc_number, :doc_date, :so_number, :customer_code,
-                    :customer_name, :customer_group, :amount, :total, :doc_stat
-                )
-            """)
             if sc_data:
+                insert_sc_query = text("""
+                    INSERT INTO artrn_sc_sr_header (
+                        doc_number, doc_date, so_number, customer_code,
+                        customer_name, customer_group, amount, total, doc_stat
+                    ) VALUES (
+                        :doc_number, :doc_date, :so_number, :customer_code,
+                        :customer_name, :customer_group, :amount, :total, :doc_stat
+                    )
+                """)
                 conn.execute(insert_sc_query, sc_data)
+
+            print(f"Inserted/Updated {len(iv_data)} IV records")
             print(f"Inserted {len(sc_data)} SC/SR records")
 
         print('SQL Insert Total time: ' + str(time.time() - ts) + ' sec.')
@@ -1102,8 +1164,15 @@ def task():
             sc_sr_numbers = set(sc_sr_df['DOCNUM']) if not sc_sr_df.empty else set()
 
             # บันทึก header (ส่ง remarks_df เข้าไป)
-            insert_to_sql(iv_df, sc_sr_df, remarks_df=remarks_df)
-            # update_duedat_by_bill()
+            insert_to_sql(
+                iv_df, sc_sr_df,
+                remarks_df=remarks_df,
+                start_date=start_date,
+                end_date=end_date,
+                purge="range"  # หรือ "all" ถ้าต้องการล้างทั้งตารางก่อน
+            )
+
+            update_duedat_by_bill()
             # อ่านและประมวลผล detail
             detail_records = read_stcrd(dbf_file_path_stcrd, iv_numbers, sc_sr_numbers)
 

@@ -84,7 +84,8 @@ def process_aptrn_artrn(file_path, doc_prefixes, type_label, use_fields=None, is
 def process_bktrn():
     print('--- process_bktrn ---')
     df = read_dbf(dbf_file_bktrn)
-    use = ["VOUCHER", "CHQNUM", "TRNDAT", "BNKACC", "PAYINDAT", "NETAMT", "CHQDAT", "REMARK"]
+    use = ["VOUCHER", "CHQNUM", "TRNDAT", "BNKACC", "PAYINDAT",
+           "NETAMT", "CHQDAT", "REMARK", "CMPLAPP"]
     for c in use:
         if c not in df.columns:
             df[c] = None
@@ -98,12 +99,14 @@ def process_bktrn():
         "NETAMT": "net_amt",
         "CHQDAT": 'chqdat',
         "REMARK": 'remark',
+        "CMPLAPP": 'cmplapp',
     })
-    # normalize dates now (ช่วย merge/กรองเร็วขึ้น)
+    # normalize dates
     df["trndat"] = _to_dt(df["trndat"])
     df["payindat"] = _to_dt(df["payindat"])
     df["chqdat"] = _to_dt(df["chqdat"])
     return df
+
 
 
 def merge_with_bktrn(source_df, bktrn_df):
@@ -148,7 +151,7 @@ def prepare_final_df(merged_df):
 
     expected_cols = ["docnum", "docdat", "type", "cuscod", "supcod", "chqnum",
                      "trndat", "bnkacc", "payindat", "net_amt", "date",
-                     "chqdat", "remark"]
+                     "chqdat", "remark", "cmplapp"]
 
     for col in expected_cols:
         if col not in df.columns:
@@ -224,7 +227,7 @@ def process_bktrn_bt(file_path, artrn_df):
     df.loc[df["TYPE"] == "in", "DATE"] = df.loc[df["TYPE"] == "in", "CHQDAT"]
 
     # เติมคอลัมน์ที่ DB ต้องการแต่ BKTRN ไม่มี
-    for c in ["BNKACC", "NETAMT", "REMARK", "DOCDAT"]:
+    for c in ["BNKACC", "NETAMT", "REMARK", "DOCDAT", "CMPLAPP"]:
         if c not in df.columns:
             df[c] = None
 
@@ -234,7 +237,7 @@ def process_bktrn_bt(file_path, artrn_df):
         "DOCDAT": "docdat",
         "TYPE": "type",
         "CHQNUM": "chqnum",
-        "CUSCOD": "cuscod",  # จะ map จาก ARTRN ต่อไป
+        "CUSCOD": "cuscod",
         "TRNDAT": "trndat",
         "BNKACC": "bnkacc",
         "PAYINDAT": "payindat",
@@ -242,6 +245,7 @@ def process_bktrn_bt(file_path, artrn_df):
         "DATE": "date",
         "CHQDAT": "chqdat",
         "REMARK": "remark",
+        "CMPLAPP": "cmplapp",
     })
 
     # map cuscod จาก ARTRN
@@ -278,8 +282,10 @@ def insert_to_db(df, table_name):
 
             sql = text("""
                 INSERT INTO ap_artrn_table
-                (docnum, docdat, type, cuscod, supcod, chqnum, trndat, bnkacc, payindat, net_amt, date, chqdat, remark, created_at)
-                VALUES (:docnum, :docdat, :type, :cuscod, :supcod, :chqnum, :trndat, :bnkacc, :payindat, :net_amt, :date, :chqdat, :remark, :now)
+                (docnum, docdat, type, cuscod, supcod, chqnum, trndat, bnkacc, payindat, 
+                 net_amt, date, chqdat, remark, cmplapp, created_at)
+                VALUES (:docnum, :docdat, :type, :cuscod, :supcod, :chqnum, :trndat, :bnkacc, 
+                        :payindat, :net_amt, :date, :chqdat, :remark, :cmplapp, :now)
             """)
 
             data = df.to_dict(orient="records")
